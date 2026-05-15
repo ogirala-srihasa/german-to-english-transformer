@@ -443,7 +443,7 @@ def run_training_experiment() -> None:
     from lr_scheduler import NoamScheduler
 
     config = {
-        'd_model': 256, 'N': 3, 'num_heads': 8, 'd_ff': 512,
+        'd_model': 256, 'N': 4, 'num_heads': 8, 'd_ff': 512,
         'dropout': 0.1, 'warmup_steps': 4000, 'batch_size': 128,
         'num_epochs': 50, 'smoothing': 0.1,
     }
