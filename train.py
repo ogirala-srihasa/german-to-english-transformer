@@ -445,7 +445,7 @@ def run_training_experiment() -> None:
     config = {
         'd_model': 256, 'N': 3, 'num_heads': 8, 'd_ff': 512,
         'dropout': 0.1, 'warmup_steps': 4000, 'batch_size': 128,
-        'num_epochs': 20, 'smoothing': 0.1,
+        'num_epochs': 50, 'smoothing': 0.1,
     }
     wandb.init(project="da6401-a3", config=config)
     device = "cuda" if torch.cuda.is_available() else "cpu"

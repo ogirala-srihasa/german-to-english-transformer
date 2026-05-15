@@ -458,10 +458,10 @@ class Transformer(nn.Module):
         self,
         src_vocab_size: int =  7853,
         tgt_vocab_size: int =  5893,
-        d_model:   int   = 512,
-        N:         int   = 6,
+        d_model:   int   = 256,
+        N:         int   = 3,
         num_heads: int   = 8,
-        d_ff:      int   = 2048,
+        d_ff:      int   = 512,
         dropout:   float = 0.1,
         checkpoint_path: str = "auto",
     ) -> None:
@@ -493,6 +493,13 @@ class Transformer(nn.Module):
                 # Override sizes so architecture matches checkpoint exactly
                 src_vocab_size = len(self.src_stoi)
                 tgt_vocab_size = len(self.tgt_stoi)
+            if 'model_config' in ckpt:
+                cfg = ckpt['model_config']
+                d_model   = cfg.get('d_model',   d_model)
+                N         = cfg.get('N',         N)
+                num_heads = cfg.get('num_heads', num_heads)
+                d_ff      = cfg.get('d_ff',      d_ff)
+                dropout   = cfg.get('dropout',   dropout)
 
         # Build architecture
         self.d_model = d_model
