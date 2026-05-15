@@ -340,7 +340,7 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer,
     scheduler,
     epoch: int,
-    path: str = "checkpoint.pt",
+    path: str = "checkpoint.pth",
 ) -> None:
     """
     Save model + optimiser + scheduler state to disk.
@@ -370,7 +370,7 @@ def save_checkpoint(
         'epoch':                epoch,
         'model_state_dict':     model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
         'model_config':         model.model_config,
         'src_stoi':             model.src_stoi,
         'tgt_stoi':             model.tgt_stoi,
@@ -507,7 +507,7 @@ def run_training_experiment() -> None:
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_checkpoint(model, optimizer, scheduler, epoch,
-                            path="best_checkpoint.pt")
+                            path="best_checkpoint.pth")
             print(f"  ✓ New best saved (val_loss={val_loss:.4f})")
 
     # ── Final BLEU on test set ─────────────────────────────────────────
