@@ -79,6 +79,10 @@ class Multi30kDataset:
         self.src_tokens: List[List[str]] = _batch_tokenize(de_texts, self.de_nlp)
         self.tgt_tokens: List[List[str]] = _batch_tokenize(en_texts, self.en_nlp)
         print("[dataset] Tokenisation complete.")
+
+        if split == 'train':
+            self.build_vocab()
+            self.process_data()
     
     
     def build_vocab(self):

@@ -18,10 +18,14 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+import torch.nn.functional as F 
 from typing import Optional
 
 from model import Transformer, make_src_mask, make_tgt_mask
 
+
+UNK_IDX, PAD_IDX, SOS_IDX, EOS_IDX = 0, 1, 2, 3
+SPECIAL_TOKENS = ["<unk>", "<pad>", "<sos>", "<eos>"]
 
 # ══════════════════════════════════════════════════════════════════════
 #  LABEL SMOOTHING LOSS  
@@ -42,7 +46,9 @@ class LabelSmoothingLoss(nn.Module):
 
     def __init__(self, vocab_size: int, pad_idx: int, smoothing: float = 0.1) -> None:
         super().__init__()
-        raise NotImplementedError
+        self.vocab_size = vocab_size
+        self.pad_idx    = pad_idx
+        self.smoothing  = smoothing
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
@@ -53,8 +59,35 @@ class LabelSmoothingLoss(nn.Module):
         Returns:
             Scalar loss value.
         """
-        # TODO: Task 3.1
-        raise NotImplementedError
+        V = self.vocab_size
+        eps = self.smoothing
+
+        # Create smoothed distribution
+        # Start: fill every position with eps / (V - 2)
+        #        -2 because we exclude the gold token AND the pad token
+        smooth_val = eps / (V - 2)
+        dist = torch.full_like(logits, smooth_val)     # [B*T, V]
+
+        # Set PAD column to 0 probability
+        dist[:, self.pad_idx] = 0.0
+
+        # Set gold token probability to (1 - eps)
+        dist.scatter_(1, target.unsqueeze(1), 1.0 - eps)
+
+        # Mask out rows where target is PAD
+        # (we don't compute loss on padding positions)
+        pad_positions = (target == self.pad_idx)
+        dist[pad_positions] = 0.0
+
+        # KL divergence: KL(dist || softmax(logits))
+        # = sum(dist * log(dist/softmax)) = sum(dist * (log_dist - log_softmax))
+        # Since dist is our target, use nn.KLDivLoss with log_softmax input
+        log_probs = F.log_softmax(logits, dim=-1)
+        loss = F.kl_div(log_probs, dist, reduction='sum')
+
+        # Normalize by number of non-PAD tokens
+        n_tokens = (~pad_positions).sum().float()
+        return loss / n_tokens.clamp(min=1)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -88,7 +121,47 @@ def run_epoch(
         avg_loss : Average loss over the epoch (float).
 
     """
-    raise NotImplementedError
+    model.train() if is_train else model.eval()
+
+    total_loss, total_tokens = 0.0, 0
+    context = torch.enable_grad() if is_train else torch.no_grad()
+
+    with context:
+        for batch_idx, (src, tgt) in enumerate(data_iter):
+            src = src.to(device)
+            tgt = tgt.to(device)
+
+            # Teacher forcing: input is tgt[:-1], target is tgt[1:]
+            tgt_input  = tgt[:, :-1]   # [B, T-1]
+            tgt_output = tgt[:, 1:]    # [B, T-1]
+
+            # Build masks
+            src_mask = make_src_mask(src)               # [B, 1, 1, src_len]
+            tgt_mask = make_tgt_mask(tgt_input)         # [B, 1, T-1, T-1]
+
+            # Forward pass
+            logits = model(src, tgt_input, src_mask, tgt_mask)  # [B, T-1, V]
+
+            # Reshape for loss: [B*(T-1), V] and [B*(T-1)]
+            B, T, V = logits.shape
+            loss = loss_fn(logits.reshape(-1, V), tgt_output.reshape(-1))
+
+            if is_train:
+                optimizer.zero_grad()
+                loss.backward()
+                # Gradient clipping (important for Transformers!)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+
+            # Count non-PAD tokens for normalization
+            n_tokens = (tgt_output != 1).sum().item()
+            total_loss   += loss.item() * n_tokens
+            total_tokens += n_tokens
+
+    avg_loss = total_loss / max(total_tokens, 1)
+    return avg_loss
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -123,12 +196,81 @@ def greedy_decode(
 
     """
     # TODO: Task 3.3 — implement token-by-token greedy decoding
-    raise NotImplementedError
+    model.eval()
+    with torch.no_grad():
+        memory = model.encode(src, src_mask)               # [1, src_len, d_model]
+        ys = torch.tensor([[start_symbol]], device=device)  # [1, 1]
+
+        for _ in range(max_len - 1):
+            tgt_mask = make_tgt_mask(ys)                   # [1, 1, cur_len, cur_len]
+            out = model.decode(memory, src_mask, ys, tgt_mask)  # [1, cur_len, V]
+            
+            # Take the last position's logits → most likely next token
+            next_token = out[:, -1, :].argmax(dim=-1, keepdim=True)  # [1, 1]
+            ys = torch.cat([ys, next_token], dim=1)                    # [1, cur_len+1]
+
+            if next_token.item() == end_symbol:
+                break
+
+    return ys  
 
 
 # ══════════════════════════════════════════════════════════════════════
 #   BLEU EVALUATION  
 # ══════════════════════════════════════════════════════════════════════
+from collections import Counter
+import math
+
+def _get_ngrams(tokens, n):
+    """Return a Counter of all n-grams in a token list."""
+    return Counter(tuple(tokens[i:i+n]) for i in range(len(tokens) - n + 1))
+
+def _corpus_bleu(hypotheses, references, max_n=4):
+    """
+    Compute corpus-level BLEU score (0-100) using only stdlib.
+
+    hypotheses : list of strings (model output sentences)
+    references : list of strings (gold sentences, same order)
+    max_n      : max n-gram order (default 4, standard BLEU-4)
+    """
+    # Accumulators for each n-gram order
+    clipped_counts = [0] * max_n   # numerator of precision
+    total_counts   = [0] * max_n   # denominator of precision
+
+    hyp_len = 0   # total hypothesis token count
+    ref_len = 0   # total reference token count (for brevity penalty)
+
+    for hyp_str, ref_str in zip(hypotheses, references):
+        hyp_tokens = hyp_str.split()
+        ref_tokens = ref_str.split()
+
+        hyp_len += len(hyp_tokens)
+        ref_len += len(ref_tokens)
+
+        for n in range(1, max_n + 1):
+            hyp_ngrams = _get_ngrams(hyp_tokens, n)
+            ref_ngrams = _get_ngrams(ref_tokens, n)
+
+            # Clipped count: for each n-gram in hyp, count up to how many
+            # times it appears in the reference (not more)
+            for ngram, hyp_count in hyp_ngrams.items():
+                clipped_counts[n-1] += min(hyp_count, ref_ngrams.get(ngram, 0))
+
+            total_counts[n-1] += max(len(hyp_tokens) - n + 1, 0)
+
+    # Compute log-average of precisions
+    log_avg = 0.0
+    for n in range(max_n):
+        if clipped_counts[n] == 0 or total_counts[n] == 0:
+            return 0.0   # any zero precision → BLEU = 0
+        log_avg += (1.0 / max_n) * math.log(clipped_counts[n] / total_counts[n])
+
+    # Brevity penalty
+    if hyp_len == 0:
+        return 0.0
+    bp = min(1.0, math.exp(1 - ref_len / hyp_len))
+
+    return bp * math.exp(log_avg) * 100   # scale to 0-100
 
 def evaluate_bleu(
     model: Transformer,
@@ -155,7 +297,38 @@ def evaluate_bleu(
 
     """
     # TODO: Task 3 — loop test set, decode, compute and return BLEU
-    raise NotImplementedError
+    model.eval()
+    hypotheses = []
+    references = []
+
+    SKIP_IDS = {1, 2, 3}   # PAD, SOS, EOS
+
+    def ids_to_str(ids):
+        tokens = []
+        for idx in ids:
+            if idx in SKIP_IDS:
+                continue
+            tokens.append(tgt_vocab.get(idx, "<unk>") if isinstance(tgt_vocab, dict)
+                          else tgt_vocab.lookup_token(idx))
+        return " ".join(tokens)
+
+    with torch.no_grad():
+        for src, tgt in test_dataloader:
+            src = src.to(device)
+
+            for i in range(src.size(0)):
+                src_i  = src[i:i+1]
+                mask_i = make_src_mask(src_i)
+
+                result = greedy_decode(
+                    model, src_i, mask_i, max_len,
+                    start_symbol=2, end_symbol=3, device=device
+                )
+
+                hypotheses.append(ids_to_str(result[0].tolist()))
+                references.append(ids_to_str(tgt[i].tolist()))
+
+    return _corpus_bleu(hypotheses, references)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -193,7 +366,18 @@ def save_checkpoint(
          'd_ff': ..., 'dropout': ...}
     """
     # TODO: implement using torch.save({...}, path)
-    raise NotImplementedError
+    torch.save({
+        'epoch':                epoch,
+        'model_state_dict':     model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'model_config':         model.model_config,
+        'src_stoi':             model.src_stoi,
+        'tgt_stoi':             model.tgt_stoi,
+        'src_itos':             model.src_itos,
+        'tgt_itos':             model.tgt_itos,
+    }, path)
+    print(f"Checkpoint saved to {path} (epoch {epoch})")
 
 
 def load_checkpoint(
@@ -216,8 +400,14 @@ def load_checkpoint(
 
     """
     # TODO: implement restore logic
-    raise NotImplementedError
-
+    ckpt = torch.load(path, map_location="cpu")
+    model.load_state_dict(ckpt['model_state_dict'])
+    if optimizer is not None:
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+    if scheduler is not None:
+        scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+    print(f"Checkpoint loaded from {path} (epoch {ckpt['epoch']})")
+    return ckpt['epoch']
 
 # ══════════════════════════════════════════════════════════════════════
 #   EXPERIMENT ENTRY POINT
@@ -247,7 +437,85 @@ def run_training_experiment() -> None:
                wandb.log({'test_bleu': bleu})
     """
     # TODO: implement full experiment
-    raise NotImplementedError
+    import wandb
+    from dataset import Multi30kDataset, collate_fn
+    from torch.utils.data import DataLoader
+    from lr_scheduler import NoamScheduler
+
+    config = {
+        'd_model': 256, 'N': 3, 'num_heads': 8, 'd_ff': 512,
+        'dropout': 0.1, 'warmup_steps': 4000, 'batch_size': 128,
+        'num_epochs': 20, 'smoothing': 0.1,
+    }
+    wandb.init(project="da6401-a3", config=config)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Datasets
+    train_ds = Multi30kDataset('train')
+
+    val_ds = Multi30kDataset('validation')
+    val_ds.load_vocab(train_ds)
+    val_ds.process_data()
+
+    test_ds = Multi30kDataset('test')
+    test_ds.load_vocab(train_ds)
+    test_ds.process_data()
+
+    train_loader = DataLoader(train_ds, batch_size=config['batch_size'],
+                              shuffle=True,  collate_fn=collate_fn, num_workers=2)
+    val_loader   = DataLoader(val_ds,   batch_size=config['batch_size'],
+                              shuffle=False, collate_fn=collate_fn)
+    test_loader  = DataLoader(test_ds,  batch_size=1,
+                              shuffle=False, collate_fn=collate_fn)
+
+    # Model (checkpoint_path=None → no download during training)
+    model = Transformer(
+        src_vocab_size=len(train_ds.src_vocab),
+        tgt_vocab_size=len(train_ds.tgt_vocab),
+        d_model=config['d_model'], N=config['N'],
+        num_heads=config['num_heads'], d_ff=config['d_ff'],
+        dropout=config['dropout'],
+        checkpoint_path=None,          
+    ).to(device)
+
+    # Attach vocab dicts so save_checkpoint can pack them
+    model.src_stoi = train_ds.src_vocab
+    model.tgt_stoi = train_ds.tgt_vocab
+    model.src_itos = train_ds.src_itos
+    model.tgt_itos = train_ds.tgt_itos
+
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=1.0, betas=(0.9, 0.98), eps=1e-9
+    )
+    scheduler = NoamScheduler(optimizer, d_model=config['d_model'],
+                              warmup_steps=config['warmup_steps'])
+    loss_fn   = LabelSmoothingLoss(len(train_ds.tgt_vocab), pad_idx=1,
+                                   smoothing=config['smoothing'])
+
+    # Training loop
+    best_val_loss = float('inf')
+    for epoch in range(config['num_epochs']):
+        train_loss = run_epoch(train_loader, model, loss_fn, optimizer, scheduler,
+                               epoch_num=epoch, is_train=True,  device=device)
+        val_loss   = run_epoch(val_loader,   model, loss_fn, None, None,
+                               epoch_num=epoch, is_train=False, device=device)
+
+        print(f"Epoch {epoch+1:02d}: train={train_loss:.4f}  val={val_loss:.4f}")
+        wandb.log({'epoch': epoch, 'train_loss': train_loss,
+                   'val_loss': val_loss, 'lr': optimizer.param_groups[0]['lr']})
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            save_checkpoint(model, optimizer, scheduler, epoch,
+                            path="best_checkpoint.pt")
+            print(f"  ✓ New best saved (val_loss={val_loss:.4f})")
+
+    # ── Final BLEU on test set ─────────────────────────────────────────
+    load_checkpoint("best_checkpoint.pth", model)
+    bleu = evaluate_bleu(model, test_loader, train_ds.tgt_itos, device=device)
+    print(f"Test BLEU: {bleu:.2f}")
+    wandb.log({'test_bleu': bleu})
+    wandb.finish()
 
 
 if __name__ == "__main__":
