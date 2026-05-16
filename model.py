@@ -476,7 +476,7 @@ class Transformer(nn.Module):
         ckpt = None
         if checkpoint_path == "auto":
             # GDRIVE_ID  = "1YIwEhGSNEWDPIAG1tUwSiWSfAqNWs5zt" 
-            GDRIVE_ID  = "1xqrjB47bVj6ofa4c6AnmbhAaE1ysIazh"
+            GDRIVE_ID  = "1XHCP3OIbsGd4_z922WNfmEXbSNkiKcMH"
             # GDRIVE_ID  = "1KnauGrqbg1a0duvmFmoBr9B22MR2cFWn" 
             local_path = "best_checkpoint.pth"
             if not os.path.exists(local_path):
