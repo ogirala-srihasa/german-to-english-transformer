@@ -476,7 +476,8 @@ class Transformer(nn.Module):
         ckpt = None
         if checkpoint_path == "auto":
             # GDRIVE_ID  = "1YIwEhGSNEWDPIAG1tUwSiWSfAqNWs5zt" 
-            GDRIVE_ID  = "1Yp_LWmSccAv-3lAHAqSdMytLaLyVniHV" 
+            # GDRIVE_ID  = "1Yp_LWmSccAv-3lAHAqSdMytLaLyVniHV"
+            GDRIVE_ID  = "1KnauGrqbg1a0duvmFmoBr9B22MR2cFWn" 
             local_path = "best_checkpoint.pth"
             if not os.path.exists(local_path):
                 gdown.download(id=GDRIVE_ID, output=local_path, quiet=False)
